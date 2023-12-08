@@ -174,8 +174,8 @@ impl<V, const N: usize> HashMap<V, N> {
 
         } else { 
             // The entry was already present, or we lost the race?
-
-            let cur_entry_ptr = bucket.load(Ordering::Acquire);
+            
+            let mut cur_entry_ptr = bucket.load(Ordering::Acquire);
             let cur_entry = unsafe { &*cur_entry_ptr };
 
             // Check if the key matches with ours, if so, return the existent
@@ -194,13 +194,22 @@ impl<V, const N: usize> HashMap<V, N> {
 
                     bucket = &self.buckets[idx];
 
-                    while bucket.load(Ordering::Acquire) != empty {
+                    cur_entry_ptr = bucket.load(Ordering::Acquire);
+                    while cur_entry_ptr != empty {
+                        
+                        let cur_entry = unsafe { &*cur_entry_ptr };
+                        if cur_entry.key == key {
+                            return Err(HashMapErr::ExistentEntry(&cur_entry.val));
+                        }
+
                         idx    = (idx + 1) & (N - 1);
                         bucket = &self.buckets[idx];
 
                         if self.entries.load(Ordering::Acquire) == N {
                             return Err(HashMapErr::HashMapFull);
                         }
+
+                        cur_entry_ptr = bucket.load(Ordering::Acquire);
                     }
 
                     // Empty bucket found, attempt to insert
@@ -393,5 +402,70 @@ mod tests {
 
         map.print_map();
         
+    }
+
+    /// Two threads attempting to insert the same keys
+    #[test]
+    fn test_threads_2() {
+
+        let map = Arc::new(HashMap::<u64, 256>::new_with_seed(1337)); 
+
+        let map_t1 = map.clone(); 
+        let map_t2 = map.clone();
+
+        let t1 = std::thread::spawn(move || {
+            let mut rng = Rng::new(789678922);
+            for _ in 0..128 {
+                let _ = map_t1.insert(rng.rand(), 
+                    (rng.get_random(100000000) as u64) + 1).ok();                
+
+            }
+        });
+
+        let t2 = std::thread::spawn(move || {
+            let mut rng = Rng::new(789678922);
+
+            for _ in 0..128 {
+                let _ = map_t2.insert(rng.rand(), 
+                    (rng.get_random(100000000) as u64) + 1).ok();                
+
+            }
+        });
+
+        let _ = t1.join();
+        let _ = t2.join();
+
+        map.print_map();
+
+        assert_eq!(map.entries(), 128);
+
+    }
+
+
+
+    /// 10 threads attempting to insert the same keys
+    #[test]
+    fn test_threads_3() {
+
+        let map = Arc::new(HashMap::<u64, 2048>::new_with_seed(1337)); 
+
+        let handles: Vec<_> = (0..10).map(|x| {
+            let map_tx = map.clone();
+            std::thread::spawn(move || {
+                let mut rng = Rng::new(789678922);
+                for _ in 0..1024 {
+                    let _ = map_tx.insert(rng.rand(), 
+                        (rng.get_random(100000000) as u64) + 1).ok();                
+
+                }          
+            })
+        }).collect();
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        assert_eq!(map.entries(), 1024);
+
     }
 }
