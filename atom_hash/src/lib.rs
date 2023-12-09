@@ -7,6 +7,7 @@
 
 extern crate alloc;
 use core::{sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
+use std::alloc::{Layout, alloc_zeroed};
 use alloc::{boxed::Box};
 
 extern crate xorshift;
@@ -28,13 +29,13 @@ pub type Bucket<V> = AtomicPtr<Entry<V>>;
 
 pub struct HashMap<V, const N: usize> {
     /// The state of this table
-    permutation: [usize; N],
+    //permutation: Box<[usize; N]>,
 
     /// Number of entries in the Table
     entries:    AtomicUsize,
 
     /// The buckets in the table.
-    buckets: [Bucket<V>; N],
+    buckets:    Box<[Bucket<V>; N]>,
 }
 
 impl<V, const N: usize> Drop for HashMap<V, N> {
@@ -77,15 +78,23 @@ impl<V, const N: usize> HashMap<V, N> {
     }
 
     pub fn new_with_seed(seed: usize) -> Self {
-        let mut rng = Rng::new(seed);
-        let mut permutation_table: Vec<usize> = (0..N).collect();        
-        Self::scramble(&mut rng, &mut permutation_table);
+        let mut rng = Rng::new(seed);  
+
+        // let mut permutation_table: Vec<usize> = (0..N).collect();
+        
+        // Self::scramble(&mut rng, &mut permutation_table);
         // println!("{:?}", &permutation_table);
         
+        let layout = Layout::array::<Bucket<V>>(N)
+            .expect("unable to allocate memory for buckets");
+
+        let raw_buckets = unsafe { alloc_zeroed(layout) }
+             as *mut [AtomicPtr<Entry<V>>; N];
+
         HashMap {
-            permutation:   permutation_table.as_slice().try_into().unwrap(),   
+            //permutation:   permutation_table.into_boxed_slice().try_into().unwrap(),   
             entries:       AtomicUsize::new(0),        
-            buckets:       unsafe { core::mem::zeroed() }
+            buckets:       unsafe { Box::from_raw(raw_buckets) }
         }
     }
 
@@ -93,7 +102,8 @@ impl<V, const N: usize> HashMap<V, N> {
     /// based on the permutation table and the key
     #[inline]
     fn get_idx(&self, key: usize) -> usize {
-        self.permutation[key & (N - 1)]
+        //self.permutation[key & (N - 1)]        
+        key & (N - 1)
     }
 
     // debug method
@@ -144,9 +154,14 @@ impl<V, const N: usize> HashMap<V, N> {
         }
     }
 
-
     /// Insert a entry into the table
     pub fn insert(&self, key: usize, value: V) -> Result<&V, HashMapErr<V>> {
+
+        // A pointer to Null
+        let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
+
+        // Prepare the new entry ptr
+        let new_entry_ptr = Box::into_raw(Box::new(Entry {key, val: value}));  
 
         // Get index for the entry
         let start_idx = self.get_idx(key);
@@ -155,12 +170,7 @@ impl<V, const N: usize> HashMap<V, N> {
         //println!("idx: {}", idx);
 
         let mut bucket = &self.buckets[idx];
-        
-        // A pointer to Null
-        let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
-
-        let new_entry_ptr = Box::into_raw(Box::new(Entry {key, val: value}));
-        
+                
         // We use CAS to place the entry if and only if the bucket is empty. Otherwise, we must
         // handle the respective cases.
         if bucket.compare_exchange(empty, new_entry_ptr, 
@@ -180,6 +190,7 @@ impl<V, const N: usize> HashMap<V, N> {
 
             // Check if the key matches with ours, if so, return the existent
             if cur_entry.key == key {
+                drop(unsafe { Box::from_raw(new_entry_ptr) });
                 return Err(HashMapErr::ExistentEntry(&cur_entry.val));
 
             } else {
@@ -187,31 +198,33 @@ impl<V, const N: usize> HashMap<V, N> {
                 loop {
                     idx = (idx + 1) & (N - 1);
 
-                    if idx == start_idx {
-                        // Wrapped around, return
-                        return Err(HashMapErr::HashMapFull);
-                    }
+                    // if idx == start_idx {
+                    //     // Wrapped around, return
+                    //     drop(unsafe { Box::from_raw(new_entry_ptr) });
+                    //     return Err(HashMapErr::HashMapFull);
+                    // }
 
                     bucket = &self.buckets[idx];
-
+                    
                     cur_entry_ptr = bucket.load(Ordering::Acquire);
                     while cur_entry_ptr != empty {
                         
                         let cur_entry = unsafe { &*cur_entry_ptr };
                         if cur_entry.key == key {
+                            drop(unsafe { Box::from_raw(new_entry_ptr) });
                             return Err(HashMapErr::ExistentEntry(&cur_entry.val));
+                        }
+
+                        if self.entries.load(Ordering::Acquire) == N {
+                            drop(unsafe { Box::from_raw(new_entry_ptr) });
+                            return Err(HashMapErr::HashMapFull);
                         }
 
                         idx    = (idx + 1) & (N - 1);
                         bucket = &self.buckets[idx];
-
-                        if self.entries.load(Ordering::Acquire) == N {
-                            return Err(HashMapErr::HashMapFull);
-                        }
-
                         cur_entry_ptr = bucket.load(Ordering::Acquire);
                     }
-
+                    
                     // Empty bucket found, attempt to insert
                     if bucket.compare_exchange(empty, new_entry_ptr, 
                         Ordering::Release,
@@ -222,6 +235,8 @@ impl<V, const N: usize> HashMap<V, N> {
                         // CAS suceeded, return new inserted entry value reference;
                         return Ok( unsafe { &(*new_entry_ptr).val });
                     }
+
+                    idx = start_idx;
                 }                    
             }
 
@@ -330,7 +345,7 @@ mod tests {
         let _  = map.insert(8, 2023);
         let _  = map.insert(12, 1990);        
         
-        map.print_map();
+        //map.print_map();
 
     }
 
@@ -346,12 +361,36 @@ mod tests {
         let _  = map.insert(16, 2023);
         let _  = map.insert(24, 1990);        
         
-        map.print_map();
+        //map.print_map();
 
         assert_eq!(*map.lookup(24).unwrap(), 1990);
         assert_eq!(*map.lookup(0).unwrap(), 1337);
         assert_eq!(*map.lookup(16).unwrap(), 2023);
         assert_eq!(*map.lookup(8).unwrap(), 2020);
+    }
+
+    #[test]
+    fn test_6_full() {
+
+        let map = HashMap::<u64, 8>::new_with_seed(12311);       
+        
+        let _  = map.insert(0, 1337);
+        let _  = map.insert(8, 2020);
+        let _  = map.insert(16, 2023);
+        let _  = map.insert(24, 1990);   
+        let _  = map.insert(12123, 1990);
+        let _  = map.insert(212354, 1990);
+        let _  = map.insert(2354, 1990);
+        let _  = map.insert(66345, 1990);     
+        
+        assert_eq!(map.entries(), 8);
+
+        match map.insert(0, 2222) {            
+            Err(HashMapErr::ExistentEntry(v)) => {
+                assert_eq!(1337, *v);
+            },            
+            _ => assert!(false)
+        }
     }
 
     #[test]
@@ -400,13 +439,15 @@ mod tests {
         let _ = t1.join();
         let _ = t2.join();
 
-        map.print_map();
+        //map.print_map();
         
     }
 
     /// Two threads attempting to insert the same keys
     #[test]
     fn test_threads_2() {
+
+        //let map: & 'static _ = Box::leak(Box::new(HashMap::<u64, 256>::new_with_seed(1337)));
 
         let map = Arc::new(HashMap::<u64, 256>::new_with_seed(1337)); 
 
@@ -418,7 +459,6 @@ mod tests {
             for _ in 0..128 {
                 let _ = map_t1.insert(rng.rand(), 
                     (rng.get_random(100000000) as u64) + 1).ok();                
-
             }
         });
 
@@ -427,19 +467,21 @@ mod tests {
 
             for _ in 0..128 {
                 let _ = map_t2.insert(rng.rand(), 
-                    (rng.get_random(100000000) as u64) + 1).ok();                
-
+                    (rng.get_random(100000000) as u64) + 1).ok();               
             }
         });
 
         let _ = t1.join();
         let _ = t2.join();
 
-        map.print_map();
+        //map.print_map();
 
         assert_eq!(map.entries(), 128);
 
     }
+
+
+   
 
 
 
@@ -466,6 +508,89 @@ mod tests {
         }
 
         assert_eq!(map.entries(), 1024);
+        // if map.entries() > 1024 {
+        //     map.print_map()
+        // }
 
     }
+
+
+        /// 10 threads attempting to insert the same keys
+        #[test]
+        fn test_threads_3x() {
+    
+            let map = Arc::new(HashMap::<u64, 16384>::new_with_seed(1337)); 
+    
+            let handles: Vec<_> = (0..10).map(|x| {
+                let map_tx = map.clone();
+                std::thread::spawn(move || {
+                    let mut rng = Rng::new(789678922);
+                    for _ in 0..12000 {
+                        let _ = map_tx.insert(rng.rand(), 
+                            (rng.get_random(100000000) as u64) + 1).ok();                
+    
+                    }          
+                })
+            }).collect();
+    
+            for h in handles {
+                let _ = h.join();
+            }
+    
+            assert_eq!(map.entries(), 12000);
+        }
+
+
+    #[test]
+    fn test_threads_4_full_map() {
+
+        let map = Arc::new(HashMap::<u64, 128>::new_with_seed(1337)); 
+
+        let handles: Vec<_> = (0..10).map(|x| {
+            let map_tx = map.clone();
+            std::thread::spawn(move || {
+                let mut rng = Rng::new(x + 100 );
+                for _ in 0..128 {
+                    let _ = map_tx.insert(rng.rand(), 
+                        (rng.get_random(100000000) as u64) + 1).ok();                
+
+                }          
+            })
+        }).collect();
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        assert_eq!(map.entries(), 128);
+    }
+
+
+    #[test]
+    fn test_threads_5_full_map() {
+
+        let map = Arc::new(HashMap::<u64, 16>::new_with_seed(1337)); 
+
+        let handles: Vec<_> = (0..5).map(|x| {
+            let map_tx = map.clone();
+            std::thread::spawn(move || {
+                let mut rng = Rng::new(12125125 );
+                for _ in 0..16 {
+                    let _ = map_tx.insert(rng.rand(), 
+                        (rng.get_random(100000000) as u64) + 1).ok();                
+
+                }          
+            })
+        }).collect();
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        //map.print_map();
+
+        assert_eq!(map.entries(), 16);
+    }
+
+    
 }

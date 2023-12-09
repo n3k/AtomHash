@@ -1,0 +1,11 @@
+[package]
+name = "test_perf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+atomic_hashmap = { path = "../atom_hash" }
+xorshift       = { path = "../xorshift" }
+hashbrown = "0.14.3"
