@@ -164,8 +164,8 @@ impl<V, const N: usize> HashMap<V, N> {
         let new_entry_ptr = Box::into_raw(Box::new(Entry {key, val: value}));  
 
         // Get index for the entry
-        let start_idx = self.get_idx(key);
-        let mut idx   = start_idx;
+        let mut start_idx = self.get_idx(key);
+        let mut idx     = start_idx;
         
         //println!("idx: {}", idx);
 
@@ -173,74 +173,80 @@ impl<V, const N: usize> HashMap<V, N> {
                 
         // We use CAS to place the entry if and only if the bucket is empty. Otherwise, we must
         // handle the respective cases.
-        if bucket.compare_exchange(empty, new_entry_ptr, 
+        match bucket.compare_exchange(empty, new_entry_ptr, 
             Ordering::Release,
-            Ordering::Acquire).is_ok() {
+            Ordering::Acquire) {
 
-            self.entries.fetch_add(1, Ordering::Release);
+            Ok(_) => {
+
+                self.entries.fetch_add(1, Ordering::Release);
             
-            // CAS suceeded, return new inserted entry value reference;
-            return Ok( unsafe { &(*new_entry_ptr).val });
-
-        } else { 
-            // The entry was already present, or we lost the race?
-            
-            let mut cur_entry_ptr = bucket.load(Ordering::Acquire);
-            let cur_entry = unsafe { &*cur_entry_ptr };
-
-            // Check if the key matches with ours, if so, return the existent
-            if cur_entry.key == key {
-                drop(unsafe { Box::from_raw(new_entry_ptr) });
-                return Err(HashMapErr::ExistentEntry(&cur_entry.val));
-
-            } else {
-                // Keys were different, go linear probing  
-                loop {
-                    idx = (idx + 1) & (N - 1);
-
-                    // if idx == start_idx {
-                    //     // Wrapped around, return
-                    //     drop(unsafe { Box::from_raw(new_entry_ptr) });
-                    //     return Err(HashMapErr::HashMapFull);
-                    // }
-
-                    bucket = &self.buckets[idx];
-                    
-                    cur_entry_ptr = bucket.load(Ordering::Acquire);
-                    while cur_entry_ptr != empty {
-                        
-                        let cur_entry = unsafe { &*cur_entry_ptr };
-                        if cur_entry.key == key {
-                            drop(unsafe { Box::from_raw(new_entry_ptr) });
-                            return Err(HashMapErr::ExistentEntry(&cur_entry.val));
-                        }
-
-                        if self.entries.load(Ordering::Acquire) == N {
-                            drop(unsafe { Box::from_raw(new_entry_ptr) });
-                            return Err(HashMapErr::HashMapFull);
-                        }
-
-                        idx    = (idx + 1) & (N - 1);
-                        bucket = &self.buckets[idx];
-                        cur_entry_ptr = bucket.load(Ordering::Acquire);
-                    }
-                    
-                    // Empty bucket found, attempt to insert
-                    if bucket.compare_exchange(empty, new_entry_ptr, 
-                        Ordering::Release,
-                        Ordering::Acquire).is_ok() {
-            
-                        self.entries.fetch_add(1, Ordering::Release);
-                        
-                        // CAS suceeded, return new inserted entry value reference;
-                        return Ok( unsafe { &(*new_entry_ptr).val });
-                    }
-
-                    idx = start_idx;
-                }                    
+                // CAS suceeded, return new inserted entry value reference;
+                return Ok( unsafe { &(*new_entry_ptr).val });
             }
 
-        }
+            Err(mut cur_entry_ptr) => {
+
+                // Hash Collision or Entry already existed
+
+                let cur_entry = unsafe { &*cur_entry_ptr };
+
+                // Check if the key matches with ours, if so, return the existent
+                if cur_entry.key == key {
+                    drop(unsafe { Box::from_raw(new_entry_ptr) });
+                    return Err(HashMapErr::ExistentEntry(&cur_entry.val));
+
+                } else {
+                    // Keys were different, go linear probing  
+                    loop {
+                        idx = (idx + 1) & (N - 1);
+
+                        // if idx == start_idx {
+                        //     // Wrapped around, return
+                        //     drop(unsafe { Box::from_raw(new_entry_ptr) });
+                        //     return Err(HashMapErr::HashMapFull);
+                        // }
+
+                        bucket = &self.buckets[idx];
+                        
+                        cur_entry_ptr = bucket.load(Ordering::Acquire);
+                        while cur_entry_ptr != empty {
+                            
+                            let cur_entry = unsafe { &*cur_entry_ptr };
+                            if cur_entry.key == key {
+                                drop(unsafe { Box::from_raw(new_entry_ptr) });
+                                return Err(HashMapErr::ExistentEntry(&cur_entry.val));
+                            }
+
+                            if self.entries.load(Ordering::Acquire) == N {
+                                drop(unsafe { Box::from_raw(new_entry_ptr) });
+                                return Err(HashMapErr::HashMapFull);
+                            }
+
+                            start_idx = idx;
+
+                            idx    = (idx + 1) & (N - 1);
+                            bucket = &self.buckets[idx];
+                            cur_entry_ptr = bucket.load(Ordering::Acquire);
+                        }
+                        
+                        // Empty bucket found, attempt to insert
+                        if bucket.compare_exchange(empty, new_entry_ptr, 
+                            Ordering::Release,
+                            Ordering::Acquire).is_ok() {
+                
+                            self.entries.fetch_add(1, Ordering::Release);
+                            
+                            // CAS suceeded, return new inserted entry value reference;
+                            return Ok( unsafe { &(*new_entry_ptr).val });
+                        }
+
+                        idx = start_idx;
+                    }                    
+                }
+            }
+
+        } 
 
     }
 
