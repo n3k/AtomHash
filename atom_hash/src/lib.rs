@@ -33,7 +33,10 @@ pub struct HashMap<V, const N: usize> {
     //permutation: Box<[usize; N]>,
 
     /// Number of entries in the Table
-    entries:    AtomicUsize,
+    entries:       AtomicUsize,
+
+    /// Number of collisions
+    collisions:    AtomicUsize,
 
     /// The buckets in the table.
     buckets:    Box<[Bucket<V>; N]>,
@@ -57,7 +60,11 @@ impl<V, const N: usize> Drop for HashMap<V, N> {
 impl<V, const N: usize> HashMap<V, N> {
 
     pub fn entries(&self) -> usize {
-        self.entries.load(Ordering::Acquire)
+        self.entries.load(Ordering::Relaxed)
+    }
+
+    pub fn collisions(&self) -> usize {
+        self.collisions.load(Ordering::Relaxed)
     }
 
     fn scramble<T>(rng: &mut Rng, slice: &mut [T]) {
@@ -95,6 +102,7 @@ impl<V, const N: usize> HashMap<V, N> {
         HashMap {
             //permutation:   permutation_table.into_boxed_slice().try_into().unwrap(),   
             entries:       AtomicUsize::new(0),        
+            collisions:    AtomicUsize::new(0),
             buckets:       unsafe { Box::from_raw(raw_buckets) }
         }
     }
@@ -194,7 +202,7 @@ impl<V, const N: usize> HashMap<V, N> {
 
             Ok(_) => {
 
-                self.entries.fetch_add(1, Ordering::Release);
+                self.entries.fetch_add(1, Ordering::Relaxed);
             
                 // CAS suceeded, return new inserted entry value reference;
                 return Ok( unsafe { &(*new_entry_ptr).val });
@@ -212,7 +220,7 @@ impl<V, const N: usize> HashMap<V, N> {
                     return Err(HashMapErr::ExistentEntry(&cur_entry.val));
 
                 } else {
-                    // Keys were different, go test linked list
+                    // Keys were different, go test linked list                    
                     loop {
                         let cur_entry = unsafe { &*cur_entry_ptr };                        
                         let mut next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
@@ -241,7 +249,9 @@ impl<V, const N: usize> HashMap<V, N> {
                             Ordering::Release,
                             Ordering::Acquire).is_ok() {
                 
-                            self.entries.fetch_add(1, Ordering::Release);
+                            self.entries.fetch_add(1, Ordering::Relaxed);
+
+                            self.collisions.fetch_add(1, Ordering::Relaxed);
                             
                             // CAS suceeded, return new inserted entry value reference;
                             return Ok( unsafe { &(*new_entry_ptr).val });
@@ -634,5 +644,24 @@ mod tests {
             },            
             _ => assert!(false)
         }
+    }
+
+    #[test]
+    fn test_collisions_1() {
+        let map = HashMap::<Vec<u8>, 8>::new_with_seed(12311);       
+        
+        let _  = map.insert(0, vec![0u8, 255]);
+        let _  = map.insert(8, Vec::new());
+        let _  = map.insert(16, vec![0u8, 1u8, 1u8, 1u8, 1u8]);
+
+        let _  = map.insert(24, Vec::new());
+        let _  = map.insert(32, Vec::new());
+        let _  = map.insert(2, Vec::new());
+        let _  = map.insert(24, Vec::new()); // key exists already
+        
+        assert_eq!(map.entries(), 6);
+        // the first entry is not a collision
+        // THe next 4 entries collide with the entry 0
+        assert_eq!(map.collisions(), 4); 
     }
 }

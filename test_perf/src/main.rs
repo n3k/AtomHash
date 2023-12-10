@@ -132,7 +132,7 @@ fn atomhash_lookup_test() {
     let handles: Vec<_> = (0..5).map(|x| {
         std::thread::spawn(move || {
             let mut rng = Rng::new(x + 12312545 );
-            for _ in 0..MAP_SIZE/10 {
+            for _ in 0..MAP_SIZE/3 {
                 let _ = map.insert(rng.rand(), 
                     (rng.get_random(100000000) as u64) + 1).ok();                
 
@@ -153,7 +153,7 @@ fn atomhash_lookup_test() {
     let handles: Vec<_> = (0..5).map(|x| {
         std::thread::spawn(move || {
             let mut rng = Rng::new(x + 12312545 );
-            for _ in 0..MAP_SIZE/10 {
+            for _ in 0..MAP_SIZE/3 {
                 assert_eq!(*map.lookup(rng.rand()).unwrap(),
                      (rng.get_random(100000000) as u64) + 1);
                }          
@@ -179,7 +179,7 @@ fn hashbrown_lookup_test() {
         let map = map.clone();
         std::thread::spawn(move || {
             let mut rng = Rng::new(x + 12312545 );
-            for _ in 0..MAP_SIZE/10 {
+            for _ in 0..MAP_SIZE/3 {
                 let _ = map.lock().unwrap().insert(rng.rand(), 
                     (rng.get_random(100000000) as u64) + 1);                
 
@@ -201,7 +201,7 @@ fn hashbrown_lookup_test() {
         let map = map.clone();
         std::thread::spawn(move || {
             let mut rng = Rng::new(x + 12312545 );
-            for _ in 0..MAP_SIZE/10 {
+            for _ in 0..MAP_SIZE/3 {
                 assert_eq!(*map.lock().unwrap().get(&rng.rand()).unwrap(),
                      (rng.get_random(100000000) as u64) + 1);
                }          
@@ -226,6 +226,8 @@ fn test_lookups() {
 
 fn main() {
 
-    test_high_write_contention();
-    //test_lookups();
+    //test_high_write_contention();
+    test_lookups();
+
+
 }

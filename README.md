@@ -13,5 +13,3 @@ If the map gets created with enough space to keep collisions low, then this shou
 ## Update
 
 Changed the collision resolution algorithm for linked lists. This improves the performance of the overall structure because now collisions of keys are constrained to the set of collided keys without affecting other buckets. Performance is looking better.
-
-
