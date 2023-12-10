@@ -7,7 +7,7 @@
 
 extern crate alloc;
 use core::{sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
-use std::alloc::{Layout, alloc_zeroed};
+use std::{alloc::{Layout, alloc_zeroed}};
 use alloc::{boxed::Box};
 
 extern crate xorshift;
@@ -17,7 +17,8 @@ use xorshift::Rng;
 #[derive(Debug)]
 pub struct Entry<V> {
     key: usize,
-    val: V
+    val: V,
+    next: AtomicPtr<Entry<V>>
 }
 
 pub enum HashMapErr<'a, V> {
@@ -77,8 +78,8 @@ impl<V, const N: usize> HashMap<V, N> {
         return Self::new_with_seed(rng.rand())        
     }
 
-    pub fn new_with_seed(seed: usize) -> Self {
-        let mut rng = Rng::new(seed);  
+    pub fn new_with_seed(_seed: usize) -> Self {
+        // let mut rng = Rng::new(seed);  
 
         // let mut permutation_table: Vec<usize> = (0..N).collect();
         
@@ -124,52 +125,66 @@ impl<V, const N: usize> HashMap<V, N> {
 
     pub fn lookup(&self, key: usize) -> Option<&V> {
 
-        let start_idx = self.get_idx(key);
-        let mut idx   = start_idx;
+        let idx = self.get_idx(key);
 
-        let mut bucket = &self.buckets[idx];
+        let bucket = &self.buckets[idx];
 
-        loop {
-            let entry_ptr = bucket.load(Ordering::Acquire);
+        let mut entry_ptr = bucket.load(Ordering::Acquire);
+        
+        if entry_ptr.is_null() {    
+            return None;
+        } 
+
+        let mut cur_entry = unsafe { &*entry_ptr };
+
+        if key == cur_entry.key {
+            return Some( &cur_entry.val );
+        } else {
+            // Collided keys,, walk the LL
             
-            if entry_ptr.is_null() {    
-                return None;
-            } 
+            // A pointer to Null
+            let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
 
-            let cur_key = unsafe { (*entry_ptr).key };
+            loop {               
+                let mut next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
 
-            if key == cur_key {
-                return Some( unsafe { &(*entry_ptr).val } )
-            } else {
-                // Collided keys,, probe linearly until the entry
-                // is either found or a the entry is null
-                // if the entry is null it means the value isn't in the map
-                idx    = (idx + 1) & (N - 1);
-                if idx == start_idx {
-                    // We wrapped around, in the search and the entry did not appear
-                    return None;
+                while next_entry_ptr != empty {
+
+                    entry_ptr  = next_entry_ptr;
+
+                    cur_entry = unsafe { &*entry_ptr };
+                    if cur_entry.key == key {
+                        return Some( &cur_entry.val );
+                    }
+
+                    next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
                 }
-                bucket = &self.buckets[idx];
+
+                return None;
             }
         }
+        
     }
 
     /// Insert a entry into the table
     pub fn insert(&self, key: usize, value: V) -> Result<&V, HashMapErr<V>> {
-
+        
         // A pointer to Null
         let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
 
         // Prepare the new entry ptr
-        let new_entry_ptr = Box::into_raw(Box::new(Entry {key, val: value}));  
+        let new_entry_ptr = 
+            Box::into_raw(
+                Box::new(Entry {
+                    key, val: value, next: unsafe { core::mem::zeroed() }
+                }));  
 
         // Get index for the entry
-        let mut start_idx = self.get_idx(key);
-        let mut idx     = start_idx;
-        
+        let idx = self.get_idx(key);
+          
         //println!("idx: {}", idx);
 
-        let mut bucket = &self.buckets[idx];
+        let bucket = &self.buckets[idx];
                 
         // We use CAS to place the entry if and only if the bucket is empty. Otherwise, we must
         // handle the respective cases.
@@ -197,41 +212,32 @@ impl<V, const N: usize> HashMap<V, N> {
                     return Err(HashMapErr::ExistentEntry(&cur_entry.val));
 
                 } else {
-                    // Keys were different, go linear probing  
+                    // Keys were different, go test linked list
                     loop {
-                        idx = (idx + 1) & (N - 1);
+                        let cur_entry = unsafe { &*cur_entry_ptr };                        
+                        let mut next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
+                        while next_entry_ptr != empty {
 
-                        // if idx == start_idx {
-                        //     // Wrapped around, return
-                        //     drop(unsafe { Box::from_raw(new_entry_ptr) });
-                        //     return Err(HashMapErr::HashMapFull);
-                        // }
+                            cur_entry_ptr  = next_entry_ptr;
 
-                        bucket = &self.buckets[idx];
-                        
-                        cur_entry_ptr = bucket.load(Ordering::Acquire);
-                        while cur_entry_ptr != empty {
-                            
                             let cur_entry = unsafe { &*cur_entry_ptr };
                             if cur_entry.key == key {
                                 drop(unsafe { Box::from_raw(new_entry_ptr) });
                                 return Err(HashMapErr::ExistentEntry(&cur_entry.val));
                             }
 
-                            if self.entries.load(Ordering::Acquire) == N {
-                                drop(unsafe { Box::from_raw(new_entry_ptr) });
-                                return Err(HashMapErr::HashMapFull);
-                            }
+                            // if self.entries.load(Ordering::Acquire) == N {
+                            //     drop(unsafe { Box::from_raw(new_entry_ptr) });
+                            //     return Err(HashMapErr::HashMapFull);
+                            // }
 
-                            start_idx = idx;
-
-                            idx    = (idx + 1) & (N - 1);
-                            bucket = &self.buckets[idx];
-                            cur_entry_ptr = bucket.load(Ordering::Acquire);
+                            next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
                         }
-                        
-                        // Empty bucket found, attempt to insert
-                        if bucket.compare_exchange(empty, new_entry_ptr, 
+
+                        // Found empty slot in the linked list and keys haven't collided
+                        // up to this point
+                       
+                        if cur_entry.next.compare_exchange(empty, new_entry_ptr, 
                             Ordering::Release,
                             Ordering::Acquire).is_ok() {
                 
@@ -239,9 +245,11 @@ impl<V, const N: usize> HashMap<V, N> {
                             
                             // CAS suceeded, return new inserted entry value reference;
                             return Ok( unsafe { &(*new_entry_ptr).val });
-                        }
+                        } 
 
-                        idx = start_idx;
+                        // Failed Race,, re-start the loop from the point where 
+                        // we were going to insert this
+
                     }                    
                 }
             }
@@ -547,56 +555,84 @@ mod tests {
         }
 
 
+    // #[test]
+    // fn test_threads_4_full_map() {
+
+    //     let map = Arc::new(HashMap::<u64, 128>::new_with_seed(1337)); 
+
+    //     let handles: Vec<_> = (0..10).map(|x| {
+    //         let map_tx = map.clone();
+    //         std::thread::spawn(move || {
+    //             let mut rng = Rng::new(x + 100 );
+    //             for _ in 0..128 {
+    //                 let _ = map_tx.insert(rng.rand(), 
+    //                     (rng.get_random(100000000) as u64) + 1).ok();                
+
+    //             }          
+    //         })
+    //     }).collect();
+
+    //     for h in handles {
+    //         let _ = h.join();
+    //     }
+
+    //     assert_eq!(map.entries(), 128);
+    // }
+
+
+    // #[test]
+    // fn test_threads_5_full_map() {
+
+    //     let map = Arc::new(HashMap::<u64, 16>::new_with_seed(1337)); 
+
+    //     let handles: Vec<_> = (0..5).map(|x| {
+    //         let map_tx = map.clone();
+    //         std::thread::spawn(move || {
+    //             let mut rng = Rng::new(12125125 );
+    //             for _ in 0..16 {
+    //                 let _ = map_tx.insert(rng.rand(), 
+    //                     (rng.get_random(100000000) as u64) + 1).ok();                
+
+    //             }          
+    //         })
+    //     }).collect();
+
+    //     for h in handles {
+    //         let _ = h.join();
+    //     }
+
+    //     //map.print_map();
+
+    //     assert_eq!(map.entries(), 16);
+    // }
+
     #[test]
-    fn test_threads_4_full_map() {
+    fn test_vector_values() {
 
-        let map = Arc::new(HashMap::<u64, 128>::new_with_seed(1337)); 
+        let map = HashMap::<Vec<u8>, 8>::new_with_seed(12311);       
+        
+        let _  = map.insert(0, vec![0u8, 255]);
+        let _  = map.insert(8, Vec::new());
+        let _  = map.insert(16, vec![0u8, 1u8, 1u8, 1u8, 1u8]);
 
-        let handles: Vec<_> = (0..10).map(|x| {
-            let map_tx = map.clone();
-            std::thread::spawn(move || {
-                let mut rng = Rng::new(x + 100 );
-                for _ in 0..128 {
-                    let _ = map_tx.insert(rng.rand(), 
-                        (rng.get_random(100000000) as u64) + 1).ok();                
+        let _  = map.insert(16, Vec::new());
+        let _  = map.insert(16, Vec::new());
+        let _  = map.insert(16, Vec::new());
+        
+        assert_eq!(map.entries(), 3);
 
-                }          
-            })
-        }).collect();
-
-        for h in handles {
-            let _ = h.join();
+        match map.insert(0, Vec::new()) {            
+            Err(HashMapErr::ExistentEntry(v)) => {
+                assert_eq!(255, v[1]);
+            },            
+            _ => assert!(false)
         }
 
-        assert_eq!(map.entries(), 128);
-    }
-
-
-    #[test]
-    fn test_threads_5_full_map() {
-
-        let map = Arc::new(HashMap::<u64, 16>::new_with_seed(1337)); 
-
-        let handles: Vec<_> = (0..5).map(|x| {
-            let map_tx = map.clone();
-            std::thread::spawn(move || {
-                let mut rng = Rng::new(12125125 );
-                for _ in 0..16 {
-                    let _ = map_tx.insert(rng.rand(), 
-                        (rng.get_random(100000000) as u64) + 1).ok();                
-
-                }          
-            })
-        }).collect();
-
-        for h in handles {
-            let _ = h.join();
+        match map.insert(16, Vec::new()) {            
+            Err(HashMapErr::ExistentEntry(v)) => {
+                assert_eq!(0, v[0]);
+            },            
+            _ => assert!(false)
         }
-
-        //map.print_map();
-
-        assert_eq!(map.entries(), 16);
     }
-
-    
 }

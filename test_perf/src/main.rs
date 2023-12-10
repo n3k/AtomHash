@@ -110,8 +110,9 @@ fn test_compare_perf_brown_rwlock() {
 
 
 fn test_high_write_contention() {
-    /// This looks bad for our implementation
-    println!("Our damn implementation:");
+    /// This looked bad for our implementation 
+    /// when linear probing was used
+    println!("Our nice implementation:");
     test_compare_perf();
 
     println!("HashBrown with Mutex: :/");
@@ -219,11 +220,12 @@ fn hashbrown_lookup_test() {
 fn test_lookups() {
     atomhash_lookup_test();
 
-
     hashbrown_lookup_test();
 
 }
 
 fn main() {
-    test_lookups();
+
+    test_high_write_contention();
+    //test_lookups();
 }
