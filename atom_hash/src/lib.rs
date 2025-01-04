@@ -16,9 +16,9 @@ use xorshift::Rng;
 
 #[derive(Debug)]
 pub struct Entry<V> {
-    key: usize,
-    val: V,
-    next: AtomicPtr<Entry<V>>
+    key         : usize,
+    val         : V,
+    next        : AtomicPtr<Entry<V>>
 }
 
 pub enum HashMapErr<'a, V> {
@@ -31,24 +31,28 @@ pub type Bucket<V> = AtomicPtr<Entry<V>>;
 pub struct HashMap<V, const N: usize> {
 
     /// Number of entries in the Table
-    entries:       AtomicUsize,
+    entries         : AtomicUsize,
 
     /// Number of collisions
-    collisions:    AtomicUsize,
+    collisions      : AtomicUsize,
 
     /// The buckets in the table.
-    buckets:    Box<[Bucket<V>; N]>,
+    buckets         : Box<[Bucket<V>; N]>,
 }
 
 impl<V, const N: usize> Drop for HashMap<V, N> {
     fn drop(&mut self) {
         for idx in 0..N {
             // Get the entry
-            let ptr = self.buckets[idx].load(Ordering::SeqCst);
+            let mut ptr = self.buckets[idx].load(Ordering::SeqCst);
 
-            if !ptr.is_null() {
+            // Remove all the chained list of items for that bucket
+            while !ptr.is_null() {
                 // Take ownership of the value to drop it
                 let boxed_ptr = unsafe { Box::from_raw(ptr) };
+                // Get the next item in the list
+                ptr = boxed_ptr.next.load(Ordering::SeqCst);
+                // drop the current
                 drop(boxed_ptr);
             }
         }
@@ -105,9 +109,9 @@ impl<V, const N: usize> HashMap<V, N> {
 
     pub fn lookup(&self, key: usize) -> Option<&V> {
 
-        let idx = self.get_idx(key);
+        let idx     = self.get_idx(key);
 
-        let bucket = &self.buckets[idx];
+        let bucket  = &self.buckets[idx];
 
         let mut entry_ptr = bucket.load(Ordering::Acquire);
         
@@ -156,7 +160,7 @@ impl<V, const N: usize> HashMap<V, N> {
         let new_entry_ptr = 
             Box::into_raw(
                 Box::new(Entry {
-                    key, val: value, next: unsafe { core::mem::zeroed() }
+                    key, val: value, next: AtomicPtr::new(core::ptr::null_mut())
                 }));  
 
         // Get index for the entry
@@ -235,6 +239,56 @@ impl<V, const N: usize> HashMap<V, N> {
 
 }
 
+
+pub struct Iter<'a, V> {
+    buckets: &'a [Bucket<V>],
+    current_bucket: usize,
+    current_entry: Option<&'a Entry<V>>,
+}
+
+impl<'a, V, const N: usize> HashMap<V, N> {
+    pub fn iter(&'a self) -> Iter<'a, V> {
+        Iter {
+            buckets: &self.buckets[..],
+            current_bucket: 0,
+            current_entry: None,
+        }
+    }
+}
+
+impl<'a, V> Iterator for Iter<'a, V> {
+    type Item = (&'a usize, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current_bucket < self.buckets.len() {
+            if let Some(entry) = self.current_entry {
+                // Traverse the linked list
+                let next_ptr = entry.next.load(Ordering::Acquire);
+                if !next_ptr.is_null() {
+                    self.current_entry = Some(unsafe { &*next_ptr });
+                    if let Some(entry) = self.current_entry {
+                        return Some((&entry.key, &entry.val));
+                    }
+                } else {
+                    // End of linked list
+                    self.current_entry = None; 
+                }
+            }
+
+            // Move to the next bucket
+            let bucket_ptr = self.buckets[self.current_bucket].load(Ordering::Acquire);
+            self.current_bucket += 1;
+            if !bucket_ptr.is_null() {
+                self.current_entry = Some(unsafe { &*bucket_ptr });
+                if let Some(entry) = self.current_entry {
+                    return Some((&entry.key, &entry.val));
+                }
+            }
+        }
+
+        None
+    }
+}
 
 
 
@@ -575,5 +629,25 @@ mod tests {
         // the first entry is not a collision
         // THe next 4 entries collide with the entry 0
         assert_eq!(map.collisions(), 4); 
+    }
+
+    #[test]
+    fn test_iter1() {
+        let map = HashMap::<Vec<u8>, 8>::new();       
+        
+        let _  = map.insert(0, vec![0u8, 255]);
+        let _  = map.insert(8, Vec::new());
+        let _  = map.insert(16, vec![0u8, 1u8, 1u8, 1u8, 1u8]);
+
+        let _  = map.insert(24, Vec::new());
+        let _  = map.insert(32, vec![0u8, 2u8, 2u8, 2u8, 2u8]);        
+        let _  = map.insert(2, Vec::new());
+        let _  = map.insert(24, Vec::new()); // key exists already
+        
+        assert_eq!(map.collisions(), 4); 
+
+        assert_eq!(6, map.iter().count())
+            
+    
     }
 }
