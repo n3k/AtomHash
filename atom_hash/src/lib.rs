@@ -28,6 +28,7 @@ pub enum HashMapErr<'a, V> {
 
 pub type Bucket<V> = AtomicPtr<Entry<V>>;
 
+#[derive(Debug)]
 pub struct HashMap<V, const N: usize> {
 
     /// Number of entries in the Table
