@@ -10,9 +10,6 @@ use core::{sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
 use std::{alloc::{Layout, alloc_zeroed}};
 use alloc::{boxed::Box};
 
-extern crate xorshift;
-use xorshift::Rng;
-
 
 #[derive(Debug)]
 pub struct Entry<V> {
@@ -297,6 +294,8 @@ impl<'a, V> Iterator for Iter<'a, V> {
 mod tests {
 
     use std::sync::Arc;
+    extern crate xorshift;
+    use xorshift::Rng;
 
     use super::*;
 
