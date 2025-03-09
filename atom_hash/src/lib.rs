@@ -6,16 +6,36 @@
 
 
 extern crate alloc;
-use core::{sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
-use std::{alloc::{Layout, alloc_zeroed}};
-use alloc::{boxed::Box};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::alloc::{Layout, alloc_zeroed};
+use alloc::boxed::Box;
+
+
+/// A trait that need to be implemented by the type defined as Key
+pub trait AtomKey: PartialEq + Copy + Clone {
+    fn as_usize(&self) -> usize;
+}
+
+impl AtomKey for u64 {
+    fn as_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
+impl AtomKey for usize {
+    fn as_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
+
 
 
 #[derive(Debug)]
-pub struct Entry<V> {
-    key         : usize,
+pub struct Entry<K: AtomKey, V> {
+    key         : K,
     val         : V,
-    next        : AtomicPtr<Entry<V>>
+    next        : AtomicPtr<Entry<K, V>>
 }
 
 pub enum HashMapErr<'a, V> {
@@ -23,10 +43,10 @@ pub enum HashMapErr<'a, V> {
     ExistentEntry(&'a V)
 }
 
-pub type Bucket<V> = AtomicPtr<Entry<V>>;
+pub type Bucket<K, V> = AtomicPtr<Entry<K, V>>;
 
 #[derive(Debug)]
-pub struct HashMap<V, const N: usize> {
+pub struct HashMap<K: AtomKey, V, const N: usize> {
 
     /// Number of entries in the Table
     entries         : AtomicUsize,
@@ -35,10 +55,12 @@ pub struct HashMap<V, const N: usize> {
     collisions      : AtomicUsize,
 
     /// The buckets in the table.
-    buckets         : Box<[Bucket<V>; N]>,
+    buckets         : Box<[Bucket<K, V>; N]>,
 }
 
-impl<V, const N: usize> Drop for HashMap<V, N> {
+pub type HashSet<K, const N:usize> = HashMap<K, (), N>;
+
+impl<K: AtomKey, V, const N: usize> Drop for HashMap<K, V, N> {
     fn drop(&mut self) {
         for idx in 0..N {
             // Get the entry
@@ -57,7 +79,7 @@ impl<V, const N: usize> Drop for HashMap<V, N> {
     }
 }
 
-impl<V, const N: usize> HashMap<V, N> {
+impl<K: AtomKey, V, const N: usize> HashMap<K, V, N> {
 
     pub fn entries(&self) -> usize {
         self.entries.load(Ordering::Relaxed)
@@ -68,11 +90,11 @@ impl<V, const N: usize> HashMap<V, N> {
     }
 
     pub fn new() -> Self {
-        let layout = Layout::array::<Bucket<V>>(N)
+        let layout = Layout::array::<Bucket<K, V>>(N)
             .expect("unable to allocate memory for buckets");
 
         let raw_buckets = unsafe { alloc_zeroed(layout) }
-             as *mut [AtomicPtr<Entry<V>>; N];
+             as *mut [AtomicPtr<Entry<K, V>>; N];
 
         HashMap {
             //permutation:   permutation_table.into_boxed_slice().try_into().unwrap(),   
@@ -85,8 +107,8 @@ impl<V, const N: usize> HashMap<V, N> {
     /// Returns a position inside the table 
     /// based on the permutation table and the key
     #[inline]
-    fn get_idx(&self, key: usize) -> usize {     
-        key & (N - 1)
+    fn get_idx(&self, key: &K) -> usize {     
+        key.as_usize() & (N - 1)
     }
 
     // debug method
@@ -99,15 +121,15 @@ impl<V, const N: usize> HashMap<V, N> {
                 continue;
             }
 
-            let cur_key = unsafe { (*entry_ptr).key  };
+            let cur_key = unsafe { &(*entry_ptr).key  };
             println!("Idx:[{:x}: {:x} -> {}", 
-                idx, entry_ptr as usize, cur_key );
+                idx, entry_ptr as usize, cur_key.as_usize() );
         }
     }
 
-    pub fn lookup(&self, key: usize) -> Option<&V> {
+    pub fn lookup(&self, key: K) -> Option<&V> {
 
-        let idx     = self.get_idx(key);
+        let idx     = self.get_idx(&key);
 
         let bucket  = &self.buckets[idx];
 
@@ -125,7 +147,7 @@ impl<V, const N: usize> HashMap<V, N> {
             // Collided keys,, walk the LL
             
             // A pointer to Null
-            let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
+            let empty:    *mut Entry<K, V> =  0 as *mut Entry<K, V>;
 
             loop {               
                 let mut next_entry_ptr = cur_entry.next.load(Ordering::Acquire);
@@ -149,10 +171,10 @@ impl<V, const N: usize> HashMap<V, N> {
     }
 
     /// Insert a entry into the table
-    pub fn insert(&self, key: usize, value: V) -> Result<&V, HashMapErr<V>> {
+    pub fn insert(&self, key: K, value: V) -> Result<&V, HashMapErr<V>> {
         
         // A pointer to Null
-        let empty:    *mut Entry<V> =  0 as *mut Entry<V>;
+        let empty:    *mut Entry<K, V> =  0 as *mut Entry<K, V>;
 
         // Prepare the new entry ptr
         let new_entry_ptr = 
@@ -162,7 +184,7 @@ impl<V, const N: usize> HashMap<V, N> {
                 }));  
 
         // Get index for the entry
-        let idx = self.get_idx(key);
+        let idx = self.get_idx(&key);
 
         let bucket = &self.buckets[idx];
                 
@@ -238,14 +260,14 @@ impl<V, const N: usize> HashMap<V, N> {
 }
 
 
-pub struct Iter<'a, V> {
-    buckets: &'a [Bucket<V>],
+pub struct Iter<'a, K: AtomKey, V> {
+    buckets: &'a [Bucket<K, V>],
     current_bucket: usize,
-    current_entry: Option<&'a Entry<V>>,
+    current_entry: Option<&'a Entry<K, V>>,
 }
 
-impl<'a, V, const N: usize> HashMap<V, N> {
-    pub fn iter(&'a self) -> Iter<'a, V> {
+impl<'a, K: AtomKey, V, const N: usize> HashMap<K, V, N> {
+    pub fn iter(&'a self) -> Iter<'a, K, V> {
         Iter {
             buckets: &self.buckets[..],
             current_bucket: 0,
@@ -254,8 +276,8 @@ impl<'a, V, const N: usize> HashMap<V, N> {
     }
 }
 
-impl<'a, V> Iterator for Iter<'a, V> {
-    type Item = (&'a usize, &'a V);
+impl<'a, K: AtomKey, V> Iterator for Iter<'a, K, V> {
+    type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.current_bucket < self.buckets.len() {
@@ -299,10 +321,16 @@ mod tests {
 
     use super::*;
 
+    impl AtomKey for usize {
+        fn as_usize(&self) -> usize {
+            *self
+        }
+    }
+
     #[test]
     fn test_1() {
 
-        let map = HashMap::<u64, 1024>::new();
+        let map = HashMap::<usize, u64, 1024>::new();
   
         let _ = map.insert(1337,41);
         let _ = map.insert(1338,0);
@@ -324,7 +352,7 @@ mod tests {
     #[test]
     fn test_2() {
 
-        let map = HashMap::<String, 8>::new();       
+        let map = HashMap::<usize, String, 8>::new();       
         
         let s1 = "first string".into();
         let s2 = "second string".into();
@@ -358,7 +386,7 @@ mod tests {
     #[test]
     fn test_3() {
 
-        let map = HashMap::<String, 8>::new();       
+        let map = HashMap::<usize, String, 8>::new();       
         
         let s1 = "first string".into();
         let s2 = "second string".into();
@@ -381,7 +409,7 @@ mod tests {
     #[test]
     fn test_4() {
 
-        let map = HashMap::<u64, 8>::new();       
+        let map = HashMap::<usize, u64, 8>::new();       
         
         let _  = map.insert(0, 1337);
         let _  = map.insert(4, 2020);
@@ -397,7 +425,7 @@ mod tests {
     #[test]
     fn test_5() {
 
-        let map = HashMap::<u64, 8>::new();       
+        let map = HashMap::<usize, u64, 8>::new();       
         
         let _  = map.insert(0, 1337);
         let _  = map.insert(8, 2020);
@@ -415,7 +443,7 @@ mod tests {
     #[test]
     fn test_6_full() {
 
-        let map = HashMap::<u64, 8>::new();       
+        let map = HashMap::<usize, u64, 8>::new();       
         
         let _  = map.insert(0, 1337);
         let _  = map.insert(8, 2020);
@@ -439,7 +467,7 @@ mod tests {
     #[test]
     fn test_thrads_1() {
 
-        let map = Arc::new(HashMap::<u64, 256>::new()); 
+        let map = Arc::new(HashMap::<usize, u64, 256>::new()); 
 
         let map_t1 = map.clone(); 
         let map_t2 = map.clone();
@@ -490,7 +518,7 @@ mod tests {
     #[test]
     fn test_threads_2() {
 
-        let map = Arc::new(HashMap::<u64, 256>::new()); 
+        let map = Arc::new(HashMap::<usize, u64, 256>::new()); 
 
         let map_t1 = map.clone(); 
         let map_t2 = map.clone();
@@ -530,7 +558,7 @@ mod tests {
     #[test]
     fn test_threads_3() {
 
-        let map = Arc::new(HashMap::<u64, 2048>::new()); 
+        let map = Arc::new(HashMap::<usize, u64, 2048>::new()); 
 
         let handles: Vec<_> = (0..10).map(|x| {
             let map_tx = map.clone();
@@ -560,7 +588,7 @@ mod tests {
         #[test]
         fn test_threads_3x() {
     
-            let map = Arc::new(HashMap::<u64, 16384>::new()); 
+            let map = Arc::new(HashMap::<usize, u64, 16384>::new()); 
     
             let handles: Vec<_> = (0..10).map(|x| {
                 let map_tx = map.clone();
@@ -585,7 +613,7 @@ mod tests {
     #[test]
     fn test_vector_values() {
 
-        let map = HashMap::<Vec<u8>, 8>::new();       
+        let map = HashMap::<usize, Vec<u8>, 8>::new();       
         
         let _  = map.insert(0, vec![0u8, 255]);
         let _  = map.insert(8, Vec::new());
@@ -614,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_collisions_1() {
-        let map = HashMap::<Vec<u8>, 8>::new();       
+        let map = HashMap::<usize, Vec<u8>, 8>::new();       
         
         let _  = map.insert(0, vec![0u8, 255]);
         let _  = map.insert(8, Vec::new());
@@ -633,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_iter1() {
-        let map = HashMap::<Vec<u8>, 8>::new();       
+        let map = HashMap::<usize, Vec<u8>, 8>::new();       
         
         let _  = map.insert(0, vec![0u8, 255]);
         let _  = map.insert(8, Vec::new());
