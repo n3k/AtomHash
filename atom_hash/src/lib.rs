@@ -7,7 +7,7 @@
 
 extern crate alloc;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::alloc::{Layout, alloc_zeroed};
+use std::{alloc::{alloc_zeroed, Layout}, hash::Hash};
 use alloc::boxed::Box;
 
 
@@ -57,8 +57,6 @@ pub struct HashMap<K: AtomKey, V, const N: usize> {
     /// The buckets in the table.
     buckets         : Box<[Bucket<K, V>; N]>,
 }
-
-pub type HashSet<K, const N:usize> = HashMap<K, (), N>;
 
 impl<K: AtomKey, V, const N: usize> Drop for HashMap<K, V, N> {
     fn drop(&mut self) {
@@ -310,6 +308,40 @@ impl<'a, K: AtomKey, V> Iterator for Iter<'a, K, V> {
     }
 }
 
+pub struct HashSet<K: AtomKey, const N:usize> {
+    hashmap: HashMap<K, (), N>
+}
+
+impl <K: AtomKey, const N:usize> HashSet<K, N> {
+    pub fn entries(&self) -> usize {
+        self.hashmap.entries()
+    }
+
+    pub fn collisions(&self) -> usize {
+        self.hashmap.collisions()
+    }
+
+    pub fn new() -> Self {
+        Self {
+            hashmap: HashMap::<K, (), N>::new()
+        }        
+    }
+
+    pub fn lookup(&self, key: K) -> Option<&()> {
+        self.hashmap.lookup(key)
+    }
+
+    pub fn insert(&self, key: K) -> Result<&(), HashMapErr<()>> {
+        self.hashmap.insert(key, ())
+    }
+}
+
+
+impl<'a, K: AtomKey, const N: usize> HashSet<K, N> {
+    pub fn iter(&'a self) -> Iter<'a, K, ()> {
+        self.hashmap.iter()
+    }
+}
 
 
 #[cfg(test)]
